@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Splat Stack</title>
+</head>
+<body>
+  <div id="app">
+    <main id="viewport">
+      <canvas id="gl"></canvas>
+      <div id="hud"></div>
+      <div id="view-tabs" class="seg">
+        <button data-view="3dgs" class="on">元の3DGS</button>
+        <button data-view="gstack" disabled title="先に「焼き込む」を押してください">ガウシアン</button>
+        <button data-view="stack" disabled title="先に「焼き込む」を押してください">ドット絵スタック</button>
+        <button data-view="split" disabled title="先に「焼き込む」を押してください">左右比較</button>
+        <button data-view="compare" disabled title="先に「焼き込む」を押してください">3分割</button>
+        <button data-view="morph" disabled title="先に「焼き込む」を押してください">変身</button>
+      </div>
+      <div id="panel-labels"></div>
+      <div id="hint">左ドラッグ：回転　右ドラッグ（またはShift＋ドラッグ）：移動　ホイール：ズーム</div>
+      <div id="pick-banner" hidden>地面（水平にしたい面）をクリックしてください　<button id="pick-cancel">やめる</button></div>
+      <div id="empty">
+        <div class="big">.ply / .splat をここにドロップ</div>
+        <div>または右のパネルの「テスト用データ」を押してください</div>
+      </div>
+      <div id="drop" hidden><div>ここで離すと読み込みます</div></div>
+      <div id="progress" hidden>
+        <div class="label"></div>
+        <div class="bar"><div class="fill"></div></div>
+      </div>
+      <div id="toast" hidden></div>
+      <div id="drawer" hidden>
+        <div class="drawer-head">
+          <span id="drawer-title">焼き込み結果</span>
+          <label class="check"><input id="drawer-bg" type="checkbox" checked /> 市松模様の背景</label>
+          <button id="drawer-close">閉じる</button>
+        </div>
+        <div class="drawer-body">
+          <div class="big-view"><canvas id="big-slice"></canvas><div id="big-label"></div></div>
+          <div id="thumbs"></div>
+        </div>
+      </div>
+      <div id="credit">Claude Code（Opus 5.5）を使用して制作</div>
+    </main>
+    <aside id="panel">
+      <h1>Splat Stack <span class="phase">フェーズ4：デモ・録画</span></h1>
+
+      <section>
+        <h2>1. 読み込み</h2>
+        <label class="file-btn">ファイルを選ぶ（.ply / .splat）<input id="file" type="file" accept=".ply,.splat" /></label>
+        <div class="sub">テスト用データ（わざと傾けて、ゴミも混ぜてあります）</div>
+        <div class="btns">
+          <button id="dummy-cube">色付き立方体</button>
+          <button id="dummy-tree">木</button>
+          <button id="dummy-stress">負荷テスト100万個</button>
+        </div>
+        <div id="file-info" class="sub"></div>
+      </section>
+
+      <section id="sec-rot">
+        <h2>2. 上方向を合わせる</h2>
+        <button id="pick-ground" class="primary">地面をクリックして水平合わせ</button>
+        <div id="rot-sliders"></div>
+        <div class="btns">
+          <button id="rot-flip">上下反転</button>
+          <button id="rot-x90">X軸 +90°</button>
+          <button id="rot-z90">Z軸 +90°</button>
+          <button id="rot-reset">回転リセット</button>
+        </div>
+      </section>
+
+      <section id="sec-crop">
+        <h2>3. クロップボックス（対象物だけ残す）</h2>
+        <div id="crop-sliders"></div>
+        <div class="btns">
+          <button id="crop-auto">自動で囲む</button>
+          <button id="crop-ground" disabled title="先に「地面をクリックして水平合わせ」をしてください">地面より上だけ残す</button>
+          <button id="crop-reset">リセット</button>
+        </div>
+      </section>
+
+      <section id="sec-filter">
+        <h2>4. ゴミ取りフィルタ</h2>
+        <div id="filter-sliders"></div>
+        <div id="iso-status" class="sub"></div>
+      </section>
+
+      <section id="sec-bake">
+        <h2>5. スライスに焼き込む</h2>
+        <div id="bake-sliders"></div>
+        <div class="row"><span class="lbl">解像度</span>
+          <select id="bake-res">
+            <option>16</option><option>24</option><option>32</option><option>48</option><option selected>64</option>
+            <option>96</option><option>128</option><option>192</option><option>256</option>
+          </select><span class="val">px</span></div>
+        <div class="seg" id="bake-mode">
+          <button data-mode="soft">ソフト</button>
+          <button data-mode="pixel" class="on">ドット絵</button>
+        </div>
+        <div id="pixel-opts">
+          <div id="pixel-sliders"></div>
+          <div class="row"><span class="lbl">パレット</span>
+            <select id="palette-mode"><option value="auto" selected>自動（メディアンカット）</option><option value="gb">ゲームボーイ4階調</option>
+              <option value="nes">ファミコンの色に寄せる</option><option value="pico8">PICO-8の16色に寄せる</option></select><span></span></div>
+          <label class="check" title="スキャンは表面にしかガウシアンがないため、輪切りが「輪」になります。その内側を近い色で埋めます"><input id="fill-inside" type="checkbox" checked /> 輪の内側を埋める（中空対策）</label>
+          <label class="check" title="重ねた後のシルエットの外側だけに線を付けます"><input id="outline" type="checkbox" /> 輪郭線（シルエットの外側） <input id="outline-color" type="color" value="#1a1424" /></label>
+          <label class="check" title="書き出す各スライス画像の周りにも1pxの線を付けます。重ねると側面が線の色になるので、ふつうはオフ"><input id="outline-slices" type="checkbox" /> スライス画像にも輪郭線を付ける（書き出し用）</label>
+          <div id="palette"></div>
+        </div>
+        <label class="check"><input id="show-slices" type="checkbox" checked /> 輪切りの位置を3D表示に重ねる</label>
+        <button id="bake" class="primary">焼き込む</button>
+        <div id="bake-status" class="sub"></div>
+        <div class="btns"><button id="open-drawer" disabled>スライス一覧を開く</button></div>
+      </section>
+
+      <section id="sec-stack">
+        <h2>7. スタック表示</h2>
+        <label class="check"><input id="auto-rotate" type="checkbox" checked /> 自動回転</label>
+        <div id="stack-sliders"></div>
+        <div class="row"><span class="lbl">厚み補間</span>
+          <select id="stack-sub">
+            <option value="1">オフ</option><option value="2">2回ずつ</option><option value="3">3回ずつ</option>
+            <option value="4">4回ずつ</option><option value="6">6回ずつ</option><option value="0" selected>自動（隙間がなくなるだけ）</option>
+          </select><span></span></div>
+        <div class="sub">マウスの左ドラッグで回転・俯角、ホイールでズーム。3DGS表示と同じカメラなので、切り替えても同じ角度のままです。</div>
+      </section>
+
+      <section id="sec-gstack">
+        <h2>8. ガウシアン・スタック</h2>
+        <div class="sub">スライスをピクセル画像にせず、ガウシアンのまま「各層の高さに置いた平たい楕円」として重ねる描き方です。「焼き込む」と同時に作られます。</div>
+        <div id="gstack-sliders"></div>
+        <div class="sub">0（平ら）だと層と層の間にすき間が見えることがあります。少し上げると、層どうしがなめらかにつながります。回転の速さ・高さの倍率・明るさの差は「7. スタック表示」の設定を共有します。</div>
+      </section>
+
+      <section id="sec-demo">
+        <h2>9. デモ・録画（X投稿用）</h2>
+        <div class="group-title">プリセット（背景色・解像度・色数をまとめて変更）</div>
+        <div class="btns" id="presets">
+          <button data-preset="gb">ゲームボーイ風</button>
+          <button data-preset="nes">ファミコン風</button>
+          <button data-preset="c16">16色</button>
+          <button data-preset="pico8">PICO-8風</button>
+          <button data-preset="soft">なめらか</button>
+        </div>
+        <div class="group-title">左右比較</div>
+        <div class="row"><span class="lbl">右側に出すもの</span>
+          <select id="split-right"><option value="stack" selected>ドット絵スタック</option><option value="gstack">ガウシアン・スタック</option></select><span></span></div>
+        <div class="group-title">変身演出</div>
+        <button id="morph-play" class="primary">変身を再生（もう一度押すと元に戻る）</button>
+        <div id="morph-sliders"></div>
+        <div class="group-title">録画</div>
+        <div class="row"><span class="lbl">大きさ</span>
+          <select id="rec-size"><option value="1080x1080" selected>1080×1080（正方形）</option><option value="1080x1920">1080×1920（縦長）</option></select><span></span></div>
+        <div class="row"><span class="lbl">構成</span>
+          <select id="rec-layout"><option value="morph" selected>変身ループ</option><option value="split">比較（横は左右・縦は上下）</option></select><span></span></div>
+        <div id="rec-sliders"></div>
+        <label class="check"><input id="rec-captions" type="checkbox" checked /> 動画に文字（タイトル・クレジット）を入れる</label>
+        <div class="btns">
+          <button id="demo-play">デモを再生（録画しない）</button>
+          <button id="rec-start" class="rec">録画して保存</button>
+        </div>
+        <div id="rec-format" class="sub"></div>
+        <div class="sub">録画はちょうど1回転して最初と同じ絵で終わるので、Xでくり返し再生しても継ぎ目が見えません。録画中はこのタブを表に出したままにしてください。</div>
+      </section>
+
+      <section id="sec-export">
+        <h2>6. 書き出す</h2>
+        <div class="row"><span class="lbl">並べ方</span>
+          <select id="exp-layout"><option value="vertical" selected>縦に並べる</option><option value="horizontal">横に並べる</option></select><span></span></div>
+        <div class="row"><span class="lbl">層の順番</span>
+          <select id="exp-order"><option value="bottom" selected>下の層が先頭</option><option value="top">上の層が先頭</option></select><span></span></div>
+        <div class="row"><span class="lbl">拡大</span>
+          <select id="exp-scale"><option value="1" selected>等倍</option><option value="2">2倍</option><option value="4">4倍</option></select><span></span></div>
+        <div class="btns">
+          <button id="exp-sheet" disabled>スプライトシート（PNG）</button>
+          <button id="exp-zip" disabled>連番PNG（ZIP）</button>
+        </div>
+        <div class="sub">Godot・GameMakerなどのスプライトスタッキングでは、ふつう「下の層が先頭」の縦並びをそのまま使えます。</div>
+      </section>
+
+      <section>
+        <h2>表示</h2>
+        <label class="check"><input id="show-removed" type="checkbox" /> 除去される部分を赤で表示</label>
+        <label class="check"><input id="show-box" type="checkbox" checked /> クロップボックスと床の格子を表示</label>
+        <div class="row"><span class="lbl">背景色</span><input id="bg" type="color" value="#1b1d24" /></div>
+        <div class="btns"><button id="cam-reset">カメラを戻す</button></div>
+      </section>
+    </aside>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

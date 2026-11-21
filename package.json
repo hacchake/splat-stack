@@ -1,0 +1,19 @@
+{
+  "name": "splat-stack",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "ガウシアンスプラット(.ply/.splat)をスプライトスタッキング用のスライスに変換するブラウザアプリ",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
+  },
+  "dependencies": {
+    "mp4-muxer": "^5.2.2"
+  }
+}
