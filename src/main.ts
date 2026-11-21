@@ -68,6 +68,8 @@ const state = {
   gThickness: 0,
   /** 低い角度ほど自動で厚くする */
   gAutoThick: true,
+  /** ガウシアンの影のぼかし（高さ1あたりのぼけ） */
+  gShadowSoft: 0.05,
   /** スタック系の表示で許す俯角の下限（度） */
   minPitchDeg: 20,
   texHeight: 0,
@@ -797,9 +799,17 @@ function setTabsEnabled(on: boolean) {
 }
 slider($('gstack-sliders'), '上方向の厚み\n（層に対する割合）', 0, 1.5, 0.05, state.gThickness,
   (v) => (v === 0 ? '平ら' : `×${v.toFixed(2)}`), (v) => { state.gThickness = v; });
+slider($('gstack-shadow-sliders'), '影のぼかし', 0, 0.4, 0.01, state.gShadowSoft,
+  (v) => (v === 0 ? 'くっきり' : v.toFixed(2)), (v) => { state.gShadowSoft = v; });
 $<HTMLInputElement>('g-auto-thick').onchange = (e) => { state.gAutoThick = (e.target as HTMLInputElement).checked; };
 
 /** ガウシアン・スタックの厚み：低い角度ほど層のすき間が見えやすいので、自動で厚くする */
+function gstackShadow() {
+  return state.shadowStrength > 0
+    ? { strength: state.shadowStrength, azimuth: state.lightAzimuth, elevation: state.lightElevation, softness: state.gShadowSoft }
+    : null;
+}
+
 function gstackThickness(pitch: number): number {
   return state.gAutoThick ? Math.max(state.gThickness, Math.cos(pitch)) : state.gThickness;
 }
@@ -876,16 +886,18 @@ function drawMorph(rect: Rect, canvasH: number, g: ReturnType<typeof stackGeomet
     shade: state.shade, background: state.background, outline: viewOutlineColor(),
     shadow: state.shadowStrength > 0 ? { strength: state.shadowStrength, azimuth: state.lightAzimuth, elevation: state.lightElevation } : null,
   };
-  // 1) ドット絵になった層（いま変わったばかりの層は白く光る）
-  stack.render({ ...base, layers: k, flashLayer: k - 1, flash: k > 0 && k < N ? 0.85 * (1 - (kf - k)) : 0 });
-  // 2) まだガウシアンのままの層
-  if (k < N) {
-    gstack.render({
-      rect, canvasHeight: canvasH, yaw: camera.yaw, pitch: g.pitch, ppu: camera.focal(rect.h) / camera.distance,
-      heightMul: state.heightMul, thickness: Math.max(state.gThickness, 1), shade: 0, background: state.background,
-      fromLayer: k, clear: false,
-    });
-  }
+  const gParams = {
+    rect, canvasHeight: canvasH, yaw: camera.yaw, pitch: g.pitch, ppu: camera.focal(rect.h) / camera.distance,
+    heightMul: state.heightMul, thickness: Math.max(state.gThickness, 1), shade: 0, background: state.background,
+    fromLayer: k, clear: false, shadow: gstackShadow(),
+  };
+  // 1) ドット絵になった層（いま変わったばかりの層は白く光る）。背景を塗った直後に、まだガウシアンの部分の影を落とす
+  stack.render({
+    ...base, layers: k, flashLayer: k - 1, flash: k > 0 && k < N ? 0.85 * (1 - (kf - k)) : 0,
+    beforeDraw: k < N ? () => gstack.drawShadow(gParams) : undefined,
+  });
+  // 2) まだガウシアンのままの層（影はもう描いたので描かない）
+  if (k < N) gstack.render({ ...gParams, shadow: null });
   // 3) スキャン線
   if (kf > 0 && kf < N) stack.drawRing(base, kf, [0.45, 0.9, 1, 0.9]);
   return {
@@ -1362,6 +1374,7 @@ function drawPanel(p: Panel, rect: { x: number; y: number; w: number; h: number 
       rect, canvasHeight: canvasH, yaw: camera.yaw, pitch: g.pitch,
       ppu: camera.focal(rect.h) / camera.distance, heightMul: state.heightMul,
       thickness: gstackThickness(g.pitch), shade: state.shade, background: state.background,
+      shadow: gstackShadow(),
     });
     return {
       title: 'ガウシアン・スタック',

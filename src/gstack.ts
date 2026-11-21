@@ -167,6 +167,9 @@ uniform float u_yaw;
 uniform float u_pitch;
 uniform float u_thick;     // 上方向の厚みを残す割合（0 = 完全に平ら）
 uniform float u_shade;
+uniform int u_shadow;      // 1 = 影の形を地面に描くパス
+uniform vec2 u_light;      // 高さ1あたりの影のずれ（地面上、画面基準の向き）
+uniform float u_penumbra;  // 高さ1あたりの影のぼけ（標準偏差）
 layout(location=0) in vec2 a_corner;
 layout(location=1) in uint a_local;   // 層の中の番号（向き別の描画順から）
 out vec4 v_color;
@@ -189,9 +192,21 @@ void main() {
   float ct = cos(theta), st = sin(theta);
   mat2 Rt = mat2(ct, st, -st, ct);
   mat2 S = Rt * mat2(sig.x * sig.x, 0.0, 0.0, sig.y * sig.y) * transpose(Rt);
-  mat2 C = A * S * transpose(A);
-  float yStd = u_thick * u_layerH * 0.5;     // 残す厚み（標準偏差）
-  C[1][1] += cp * cp * yStd * yStd;
+  mat2 C;
+  if (u_shadow == 1) {
+    // 影：光の向きに沿って地面（高さ0）へずらし、高いところほどぼかす
+    vec2 g = vec2(pos.x * cy - pos.y * sy, pos.x * sy + pos.y * cy) + u_light * h;
+    center = vec2(g.x, g.y * sp + total * 0.5 * cp);
+    float pen = u_penumbra * h;
+    C = A * (S + mat2(pen * pen, 0.0, 0.0, pen * pen)) * transpose(A);
+    // 1層ぶんの厚みが落とす影は、光の向きに細長く伸びる（これがないと層ごとの影が縞になる）
+    vec2 L = u_light * u_layerH * 0.6;
+    C += mat2(L.x * L.x, L.x * L.y * sp, L.x * L.y * sp, L.y * L.y * sp * sp);
+  } else {
+    C = A * S * transpose(A);
+    float yStd = u_thick * u_layerH * 0.5;     // 残す厚み（標準偏差）
+    C[1][1] += cp * cp * yStd * yStd;
+  }
   C *= u_ppu * u_ppu;
   float a = C[0][0] + 0.3, b = C[0][1], c = C[1][1] + 0.3;
   float mid = 0.5 * (a + c);
@@ -213,6 +228,8 @@ void main() {
 
 const FS = `#version 300 es
 precision highp float;
+precision highp int;
+uniform int u_shadow;
 in vec4 v_color;
 in vec2 v_pos;
 out vec4 o;
@@ -221,10 +238,27 @@ void main() {
   if (r2 > 9.0) discard;
   float al = min(0.99, exp(-0.5 * r2) * v_color.a);
   if (al < 1.0 / 255.0) discard;
-  o = vec4(v_color.rgb * al, al);
+  o = u_shadow == 1 ? vec4(al) : vec4(v_color.rgb * al, al);
 }`;
 
-function compile(gl: WebGL2RenderingContext): WebGLProgram {
+// 影のマップを画面に重ねる（マップは縮小して描くので、なめらかに引き伸ばされる）
+const SHADOW_VS = `#version 300 es
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+const SHADOW_FS = `#version 300 es
+precision highp float;
+uniform sampler2D u_mask;
+uniform vec4 u_rect;       // 描画先の左下とサイズ（デバイスピクセル）
+uniform float u_strength;
+out vec4 o;
+void main() {
+  vec2 uv = (gl_FragCoord.xy - u_rect.xy) / u_rect.zw;
+  o = vec4(0.0, 0.0, 0.0, u_strength * texture(u_mask, uv).r);
+}`;
+
+function compile(gl: WebGL2RenderingContext, vs = VS, fs = FS): WebGLProgram {
   const mk = (type: number, src: string) => {
     const s = gl.createShader(type)!;
     gl.shaderSource(s, src);
@@ -233,8 +267,8 @@ function compile(gl: WebGL2RenderingContext): WebGLProgram {
     return s;
   };
   const p = gl.createProgram()!;
-  gl.attachShader(p, mk(gl.VERTEX_SHADER, VS));
-  gl.attachShader(p, mk(gl.FRAGMENT_SHADER, FS));
+  gl.attachShader(p, mk(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, mk(gl.FRAGMENT_SHADER, fs));
   gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('ガウシアン・スタックのリンクエラー: ' + gl.getProgramInfoLog(p));
   return p;
@@ -254,7 +288,11 @@ export interface GStackParams {
   fromLayer?: number;
   /** false なら背景を塗らずに上から描き足す */
   clear?: boolean;
+  /** 地面に落ちる影（濃さ・光の向き・光の高さ・ぼかし） */
+  shadow?: GShadow | null;
 }
+
+export interface GShadow { strength: number; azimuth: number; elevation: number; softness: number }
 
 export class GaussianStackRenderer {
   private prog: WebGLProgram;
@@ -264,11 +302,25 @@ export class GaussianStackRenderer {
   private u: Record<string, WebGLUniformLocation | null> = {};
   private data: GaussianStack | null = null;
   private bpe = 2; // 描画順の1個のバイト数（2 = Uint16, 4 = Uint32）
+  private shadowProg: WebGLProgram;
+  private shadowFbo: WebGLFramebuffer;
+  private shadowTex: WebGLTexture;
+  private shadowSize = [0, 0];
 
   constructor(private gl: WebGL2RenderingContext) {
     this.prog = compile(gl);
-    for (const n of ['u_tex', 'u_base', 'u_width', 'u_viewport', 'u_ppu', 'u_layerH', 'u_slices', 'u_yaw', 'u_pitch', 'u_thick', 'u_shade'])
+    for (const n of ['u_tex', 'u_base', 'u_width', 'u_viewport', 'u_ppu', 'u_layerH', 'u_slices', 'u_yaw', 'u_pitch', 'u_thick', 'u_shade',
+      'u_shadow', 'u_light', 'u_penumbra'])
       this.u[n] = gl.getUniformLocation(this.prog, n);
+    this.shadowProg = compile(gl, SHADOW_VS, SHADOW_FS);
+    for (const n of ['u_mask', 'u_rect', 'u_strength']) this.u['s_' + n] = gl.getUniformLocation(this.shadowProg, n);
+    this.shadowTex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.shadowTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.shadowFbo = gl.createFramebuffer()!;
     this.vao = gl.createVertexArray()!;
     gl.bindVertexArray(this.vao);
     const quad = gl.createBuffer()!;
@@ -328,42 +380,113 @@ export class GaussianStackRenderer {
       gl.clearColor(p.background[0], p.background[1], p.background[2], 1);
       gl.clear(gl.COLOR_BUFFER_BIT);
     }
+    if (p.shadow && p.shadow.strength > 0) this.drawShadow(p);
+    gl.viewport(x, glY, w, h);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(x, glY, w, h);
     const s = this.data;
     let drawn = 0;
     if (s && s.count > 0) {
-      gl.useProgram(this.prog);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.tex);
-      gl.uniform1i(this.u.u_tex, 0);
-      gl.uniform1f(this.u.u_width, s.region.width);
-      gl.uniform2f(this.u.u_viewport, w, h);
-      gl.uniform1f(this.u.u_ppu, p.ppu);
-      gl.uniform1f(this.u.u_layerH, s.layerH * p.heightMul);
-      gl.uniform1f(this.u.u_slices, s.slices);
-      gl.uniform1f(this.u.u_yaw, p.yaw);
-      gl.uniform1f(this.u.u_pitch, p.pitch);
-      gl.uniform1f(this.u.u_thick, p.thickness);
-      gl.uniform1f(this.u.u_shade, p.shade);
+      this.setup(p, w, h);
+      gl.uniform1i(this.u.u_shadow, 0);
       gl.enable(gl.BLEND);
       // 下の層から順に「上に重ねる」。層の中は、向きに合った「奥→手前」の順（あらかじめ作った表から選ぶだけ）
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-      gl.bindVertexArray(this.vao);
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.orderBuf);
-      const type = this.bpe === 2 ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
-      const dirBase = GaussianStackRenderer.dirFor(p.yaw) * s.count;
-      const from = Math.max(0, Math.min(s.slices, Math.floor(p.fromLayer ?? 0)));
-      for (let k = from; k < s.slices; k++) {
-        const start = s.starts[k], cnt = s.starts[k + 1] - start;
-        if (cnt <= 0) continue;
-        gl.uniform1ui(this.u.u_base, start);
-        gl.vertexAttribIPointer(1, 1, type, 0, (dirBase + start) * this.bpe);
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, cnt);
-        drawn += cnt;
-      }
-      gl.vertexAttribIPointer(1, 1, type, 0, 0);
-      gl.bindVertexArray(null);
+      drawn = this.drawLayers(p, GaussianStackRenderer.dirFor(p.yaw));
     }
     gl.disable(gl.SCISSOR_TEST);
     return drawn;
+  }
+
+  /** 描画に共通の設定 */
+  private setup(p: GStackParams, w: number, h: number) {
+    const gl = this.gl, s = this.data!;
+    gl.useProgram(this.prog);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    gl.uniform1i(this.u.u_tex, 0);
+    gl.uniform1f(this.u.u_width, s.region.width);
+    gl.uniform2f(this.u.u_viewport, w, h);
+    gl.uniform1f(this.u.u_ppu, p.ppu);
+    gl.uniform1f(this.u.u_layerH, s.layerH * p.heightMul);
+    gl.uniform1f(this.u.u_slices, s.slices);
+    gl.uniform1f(this.u.u_yaw, p.yaw);
+    gl.uniform1f(this.u.u_pitch, p.pitch);
+    gl.uniform1f(this.u.u_thick, p.thickness);
+    gl.uniform1f(this.u.u_shade, p.shade);
+  }
+
+  /** fromLayer から上の層を、向き dir の描画順で描く */
+  private drawLayers(p: GStackParams, dir: number): number {
+    const gl = this.gl, s = this.data!;
+    let drawn = 0;
+    gl.bindVertexArray(this.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.orderBuf);
+    const type = this.bpe === 2 ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
+    const dirBase = dir * s.count;
+    const from = Math.max(0, Math.min(s.slices, Math.floor(p.fromLayer ?? 0)));
+    for (let k = from; k < s.slices; k++) {
+      const start = s.starts[k], cnt = s.starts[k + 1] - start;
+      if (cnt <= 0) continue;
+      gl.uniform1ui(this.u.u_base, start);
+      gl.vertexAttribIPointer(1, 1, type, 0, (dirBase + start) * this.bpe);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, cnt);
+      drawn += cnt;
+    }
+    gl.vertexAttribIPointer(1, 1, type, 0, 0);
+    gl.bindVertexArray(null);
+    return drawn;
+  }
+
+  /**
+   * 地面に落ちる影を、いま塗ってある背景の上に重ねる。
+   * 1) 縮小した影マップに、各ガウシアンを地面へ落とした形を「濃いほうを残す」合成で描く（重なっても濃くならない）
+   * 2) それを引き伸ばして、黒の半透明として重ねる（縮小してあるので縁がなめらかになる）
+   * 変身演出から、ドット絵より先に呼べるよう public にしてある。
+   */
+  drawShadow(p: GStackParams) {
+    const gl = this.gl, s = this.data, sh = p.shadow;
+    if (!s || !sh || s.count === 0) return;
+    const { x, y, w, h } = p.rect;
+    const glY = p.canvasHeight - y - h;
+    const sw = Math.max(1, Math.ceil(w / 2)), shh = Math.max(1, Math.ceil(h / 2));
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFbo);
+    if (this.shadowSize[0] !== sw || this.shadowSize[1] !== shh) {
+      gl.bindTexture(gl.TEXTURE_2D, this.shadowTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, sw, shh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.shadowTex, 0);
+      this.shadowSize = [sw, shh];
+    }
+    gl.disable(gl.SCISSOR_TEST);
+    gl.viewport(0, 0, sw, shh);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    this.setup(p, w, h);
+    const el = Math.max(5, Math.min(85, sh.elevation)) * Math.PI / 180;
+    const az = sh.azimuth * Math.PI / 180;
+    const len = 1 / Math.tan(el);
+    gl.uniform1i(this.u.u_shadow, 1);
+    gl.uniform2f(this.u.u_light, Math.cos(az) * len, Math.sin(az) * len);
+    gl.uniform1f(this.u.u_penumbra, sh.softness);
+    gl.enable(gl.BLEND);
+    gl.blendEquation(gl.MAX);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    this.drawLayers(p, 0);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.uniform1i(this.u.u_shadow, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // 画面に重ねる
+    gl.viewport(x, glY, w, h);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(x, glY, w, h);
+    gl.useProgram(this.shadowProg);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.shadowTex);
+    gl.uniform1i(this.u.s_u_mask, 0);
+    gl.uniform4f(this.u.s_u_rect, x, glY, w, h);
+    gl.uniform1f(this.u.s_u_strength, sh.strength);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.bindVertexArray(null);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 }

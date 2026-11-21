@@ -118,6 +118,8 @@ export interface StackParams {
   layers?: number;
   /** false なら背景を塗らずに上から描き足す */
   clear?: boolean;
+  /** 背景を塗った直後に呼ぶ（変身演出で、ガウシアン部分の影を先に描くため） */
+  beforeDraw?: () => void;
   /** 変身演出：光らせる層とその強さ */
   flashLayer?: number;
   flash?: number;
@@ -225,6 +227,12 @@ export class StackRenderer {
     gl.clearColor(p.background[0], p.background[1], p.background[2], 1);
     gl.clearStencil(0);
     gl.clear(p.clear === false ? gl.STENCIL_BUFFER_BIT : gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    if (p.beforeDraw) {
+      p.beforeDraw();
+      gl.viewport(x, glY, w, h);
+      gl.enable(gl.SCISSOR_TEST);
+      gl.scissor(x, glY, w, h);
+    }
     if (!this.tex) { gl.disable(gl.SCISSOR_TEST); return 0; }
 
     gl.useProgram(this.prog);
