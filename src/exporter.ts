@@ -1,5 +1,7 @@
 // 書き出し：スプライトシート（PNG）と連番PNG（ZIPにまとめる）
 import type { Finished } from './postprocess';
+import type { SplatData } from './splat';
+import type { M3, V3 } from './math';
 
 export interface ExportOptions {
   /** 'vertical' = 縦に並べる / 'horizontal' = 横に並べる */
@@ -130,4 +132,69 @@ function makeZip(files: { name: string; data: Uint8Array }[]): Blob {
   end.setUint32(12, cdSize, true);
   end.setUint32(16, offset, true);
   return new Blob([...parts, ...central, new Uint8Array(end.buffer)] as BlobPart[], { type: 'application/zip' });
+}
+
+// ---------- 3DGS の標準形式 .ply として書き出す ----------
+const SH_C0 = 0.28209479177387814;
+
+/** 回転行列（行優先）→ クォータニオン (w,x,y,z) */
+function mat3ToQuat(m: M3): [number, number, number, number] {
+  const t = m[0] + m[4] + m[8];
+  let w, x, y, z;
+  if (t > 0) {
+    const s = Math.sqrt(t + 1) * 2;
+    w = 0.25 * s; x = (m[7] - m[5]) / s; y = (m[2] - m[6]) / s; z = (m[3] - m[1]) / s;
+  } else if (m[0] > m[4] && m[0] > m[8]) {
+    const s = Math.sqrt(1 + m[0] - m[4] - m[8]) * 2;
+    w = (m[7] - m[5]) / s; x = 0.25 * s; y = (m[1] + m[3]) / s; z = (m[2] + m[6]) / s;
+  } else if (m[4] > m[8]) {
+    const s = Math.sqrt(1 + m[4] - m[0] - m[8]) * 2;
+    w = (m[2] - m[6]) / s; x = (m[1] + m[3]) / s; y = 0.25 * s; z = (m[5] + m[7]) / s;
+  } else {
+    const s = Math.sqrt(1 + m[8] - m[0] - m[4]) * 2;
+    w = (m[3] - m[1]) / s; x = (m[2] + m[6]) / s; y = (m[5] + m[7]) / s; z = 0.25 * s;
+  }
+  return [w, x, y, z];
+}
+
+/**
+ * 表示中のガウシアン（クロップ・フィルタ・上方向合わせを反映したもの）を、
+ * 一般的な3DGSビューア（SuperSplat など）で開ける .ply にして保存する。
+ */
+export function exportPly(d: SplatData, mask: Uint8Array, R: M3, c: V3, baseName: string): number {
+  let n = 0;
+  for (let i = 0; i < d.count; i++) if (mask[i]) n++;
+  const props = ['x', 'y', 'z', 'nx', 'ny', 'nz', 'f_dc_0', 'f_dc_1', 'f_dc_2',
+    ...Array.from({ length: 45 }, (_, k) => 'f_rest_' + k), 'opacity', 'scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3'];
+  const header = 'ply\nformat binary_little_endian 1.0\n' +
+    `comment Splat Stack（Claude Code（Opus 5.5）を使用して制作）で書き出し\nelement vertex ${n}\n` +
+    props.map((pp) => 'property float ' + pp).join('\n') + '\nend_header\n';
+  const head = new TextEncoder().encode(header);
+  // 見出しの長さが4の倍数とは限らないので、数値は別に作ってから後ろにつなげる
+  const f = new Float32Array(n * props.length);
+  const qR = mat3ToQuat(R);
+  const P = d.positions, S = d.scales, Q = d.rotations, C = d.colors;
+  let k = 0;
+  for (let i = 0; i < d.count; i++) {
+    if (!mask[i]) continue;
+    const b = k * props.length;
+    const px = P[i * 3] - c[0], py = P[i * 3 + 1] - c[1], pz = P[i * 3 + 2] - c[2];
+    f[b] = R[0] * px + R[1] * py + R[2] * pz;
+    f[b + 1] = R[3] * px + R[4] * py + R[5] * pz;
+    f[b + 2] = R[6] * px + R[7] * py + R[8] * pz;
+    // f[b+3..5] = 法線（使わないので0）、f_rest も0
+    for (let ch = 0; ch < 3; ch++) f[b + 6 + ch] = (C[i * 4 + ch] / 255 - 0.5) / SH_C0;
+    const a = Math.min(0.999, Math.max(0.001, C[i * 4 + 3] / 255));
+    f[b + 54] = Math.log(a / (1 - a));
+    for (let ax = 0; ax < 3; ax++) f[b + 55 + ax] = Math.log(Math.max(1e-7, S[i * 3 + ax]));
+    // 回転：上方向合わせの回転を、元の向きの前に掛ける
+    const [w1, x1, y1, z1] = qR, w2 = Q[i * 4], x2 = Q[i * 4 + 1], y2 = Q[i * 4 + 2], z2 = Q[i * 4 + 3];
+    f[b + 58] = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2;
+    f[b + 59] = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2;
+    f[b + 60] = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2;
+    f[b + 61] = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2;
+    k++;
+  }
+  download(new Blob([head, f], { type: 'application/octet-stream' }), `${baseName}_3dgs.ply`);
+  return n;
 }

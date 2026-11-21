@@ -16,7 +16,7 @@ export interface PixelOptions {
   /** スキャンは表面にしかガウシアンがないので、輪切りが「輪」になる。その内側を埋める */
   fillInside: boolean;
   /** 'auto' = 自動で色を選ぶ / 'gb' = ゲームボーイ4階調 / 'nes' = ファミコンの色に寄せる / 'pico8' = PICO-8の16色に寄せる */
-  palette: 'auto' | 'gb' | 'nes' | 'pico8';
+  palette: 'auto' | 'gb' | 'nes' | 'pico8' | 'keep';
   /** ディザ（中間の色を点々の混ざりで表す） */
   dither: boolean;
 }
@@ -69,8 +69,12 @@ export function finish(raw: BakeRaw, mode: OutputMode, opt: PixelOptions): Finis
     return o;
   });
   // 2) 全層共通のパレットをメディアンカットで作る（層ごとに色がばらつかないように）
-  let palette: RGB[];
-  if (opt.palette === 'gb') {
+  let palette: RGB[] | null;
+  if (opt.palette === 'keep') {
+    // 元の色のまま（スプライトスタック素材から読み込んだドット絵を、そのまま使うとき）
+    palette = null;
+    for (const o of layers) for (let i = 0; i < o.length; i += 4) if (!o[i + 3]) o[i] = o[i + 1] = o[i + 2] = 0;
+  } else if (opt.palette === 'gb') {
     // ゲームボーイ風：明るさの順に4等分して、4階調に割り当てる
     palette = GAMEBOY;
     const lum = (o: Uint8ClampedArray, i: number) => 0.3 * o[i] + 0.59 * o[i + 1] + 0.11 * o[i + 2];
@@ -87,25 +91,26 @@ export function finish(raw: BakeRaw, mode: OutputMode, opt: PixelOptions): Finis
         o[i] = p[0]; o[i + 1] = p[1]; o[i + 2] = p[2];
       }
   } else {
-    palette = medianCut(layers, opt.colors);
+    let pal = medianCut(layers, opt.colors);
     // ファミコン風・PICO-8風：作った色を、その機種で出せる一番近い色に寄せる
     const fixed = opt.palette === 'nes' ? NES : opt.palette === 'pico8' ? PICO8 : null;
     if (fixed) {
       const seen = new Set<number>();
-      palette = palette.map((c) => fixed[nearest(fixed, c[0], c[1], c[2])]).filter((c) => {
+      pal = pal.map((c) => fixed[nearest(fixed, c[0], c[1], c[2])]).filter((c) => {
         const k = (c[0] << 16) | (c[1] << 8) | c[2];
         if (seen.has(k)) return false;
         seen.add(k);
         return true;
       });
     }
+    palette = pal;
   }
   // 3) 一番近いパレット色に置き換え
   const cache = new Map<number, number>();
   // ディザ：4×4の決まった模様で少しずつ色をずらしてから一番近い色を選ぶと、中間の色が「点々の混ざり」で表せる
   const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
   const amp = opt.dither ? 40 : 0;
-  if (opt.palette !== 'gb') for (const o of layers) {
+  if (palette && opt.palette !== 'gb') for (const o of layers) {
     for (let i = 0; i < o.length; i += 4) {
       if (!o[i + 3]) { o[i] = o[i + 1] = o[i + 2] = 0; continue; }
       const px = (i >> 2) % res, py = Math.floor((i >> 2) / res);
@@ -113,8 +118,8 @@ export function finish(raw: BakeRaw, mode: OutputMode, opt: PixelOptions): Finis
       const r = Math.max(0, Math.min(255, o[i] + d)) | 0, g = Math.max(0, Math.min(255, o[i + 1] + d)) | 0, b = Math.max(0, Math.min(255, o[i + 2] + d)) | 0;
       const key = (r << 16) | (g << 8) | b;
       let pi = cache.get(key);
-      if (pi === undefined) { pi = nearestIndex(palette, r, g, b); cache.set(key, pi); }
-      const p = palette[pi];
+      if (pi === undefined) { pi = nearestIndex(palette!, r, g, b); cache.set(key, pi); }
+      const p = palette![pi];
       o[i] = p[0]; o[i + 1] = p[1]; o[i + 2] = p[2];
     }
   }

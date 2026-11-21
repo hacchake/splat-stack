@@ -62,6 +62,18 @@
           <button id="dummy-stress">負荷テスト100万個</button>
         </div>
         <div id="file-info" class="sub"></div>
+        <div class="group-title">スプライトスタック素材から作る（ドット絵 → ガウシアン）</div>
+        <label class="file-btn">素材を選ぶ（PNGシート・連番PNG・ZIP・.vox）<input id="sprite-file" type="file" accept=".png,.zip,.vox" multiple /></label>
+        <div id="sprite-opts" hidden>
+          <div class="row"><span class="lbl">並べ方</span>
+            <select id="sprite-layout"><option value="auto" selected>自動</option><option value="vertical">縦に並んでいる</option><option value="horizontal">横に並んでいる</option></select><span></span></div>
+          <div class="row"><span class="lbl">1枚の大きさ</span><input id="sprite-frame" type="number" min="0" value="0" title="0 なら正方形とみなして自動" /><span class="val">px</span></div>
+          <div class="row"><span class="lbl">層の順番</span>
+            <select id="sprite-order"><option value="bottom" selected>先頭が一番下</option><option value="top">先頭が一番上</option></select><span></span></div>
+          <div id="sprite-sliders"></div>
+          <div class="btns"><button id="sprite-reconvert">この設定で変換し直す</button></div>
+        </div>
+        <div id="sprite-info" class="sub"></div>
       </section>
 
       <section id="sec-rot">
@@ -108,7 +120,7 @@
           <div id="pixel-sliders"></div>
           <div class="row"><span class="lbl">パレット</span>
             <select id="palette-mode"><option value="auto" selected>自動（メディアンカット）</option><option value="gb">ゲームボーイ4階調</option>
-              <option value="nes">ファミコンの色に寄せる</option><option value="pico8">PICO-8の16色に寄せる</option></select><span></span></div>
+              <option value="nes">ファミコンの色に寄せる</option><option value="pico8">PICO-8の16色に寄せる</option><option value="keep">元の色のまま</option></select><span></span></div>
           <label class="check" title="色数が少ないとき、なめらかな色の変化を「2色の点々の混ざり」で表します。グラデーションの多い物に向いています"><input id="dither" type="checkbox" /> ディザ（色の変わり目を点々でなめらかに）</label>
           <label class="check" title="スキャンは表面にしかガウシアンがないため、輪切りが「輪」になります。その内側を近い色で埋めます"><input id="fill-inside" type="checkbox" checked /> 輪の内側を埋める（中空対策）</label>
           <label class="check" title="重ねた後のシルエットの外側だけに線を付けます"><input id="outline" type="checkbox" /> 輪郭線（シルエットの外側） <input id="outline-color" type="color" value="#1a1424" /></label>
@@ -186,6 +198,7 @@
         <div class="btns">
           <button id="exp-sheet" disabled>スプライトシート（PNG）</button>
           <button id="exp-zip" disabled>連番PNG（ZIP）</button>
+          <button id="exp-ply" disabled title="表示中のガウシアン（クロップ・フィルタ・上方向合わせを反映）を、ほかの3DGSツールでも開ける形で保存します">3DGS（.ply）</button>
         </div>
         <div class="sub">Godot・GameMakerなどのスプライトスタッキングでは、ふつう「下の層が先頭」の縦並びをそのまま使えます。</div>
       </section>

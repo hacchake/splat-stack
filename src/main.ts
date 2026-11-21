@@ -7,9 +7,10 @@ import { eulerToM3, m3ToEuler, modelMatrix, mul3, mul4, rotationBetween, dot, su
 import { pickPoint, fitPlane } from './level';
 import { makeCube, makeTree, makeStress } from './dummy';
 import { makeHouse, makeMushroom, makeCar, makeChest, makeCactus } from './dummy2';
+import { loadSpriteFiles, spritesToGaussians, type SpriteSource, type SheetOptions } from './sprites';
 import { SliceBaker, type BakeRaw, type BakeRegion } from './baker';
 import { finish, type Finished, type OutputMode, type PixelOptions } from './postprocess';
-import { exportSheet, exportZip, type ExportOptions } from './exporter';
+import { exportSheet, exportZip, exportPly, type ExportOptions } from './exporter';
 import { StackRenderer } from './stack';
 import { GaussianStackRenderer, buildGaussianStack } from './gstack';
 import { GpuTimer } from './gputimer';
@@ -72,6 +73,10 @@ const state = {
   gShadowSoft: 0.05,
   /** ガウシアン・スタックで、層の中の高さを保つ（段々を消す） */
   gKeepHeight: true,
+  /** スプライトスタック素材から作ったときの元データ */
+  sprite: null as null | { src: SpriteSource },
+  spriteLayerPx: 1,
+  spriteSoftness: 0.55,
   /** スタック系の表示で許す俯角の下限（度） */
   minPitchDeg: 20,
   texHeight: 0,
@@ -391,6 +396,8 @@ function setData(d: SplatData, packed: PackedSplats, name: string) {
   $<HTMLButtonElement>('exp-sheet').disabled = true;
   $<HTMLButtonElement>('exp-zip').disabled = true;
   $<HTMLButtonElement>('open-drawer').disabled = true;
+  $<HTMLButtonElement>('exp-ply').disabled = false;
+  state.sprite = null;
   setView('3dgs');
   gstack.set(null);
   setTabsEnabled(false);
@@ -454,8 +461,10 @@ window.addEventListener('drop', (e) => {
   e.preventDefault();
   dragDepth = 0;
   $('drop').hidden = true;
-  const f = e.dataTransfer?.files?.[0];
-  if (f) loadFile(f);
+  const files = Array.from(e.dataTransfer?.files ?? []);
+  if (!files.length) return;
+  if (files.every((f) => /\.(png|zip|vox)$/i.test(f.name))) importSprites(files);
+  else loadFile(files[0]);
 });
 
 function loadDummy(make: () => SplatData, name: string) {
@@ -575,7 +584,7 @@ function upArrow(): Float32Array {
 const baker = new SliceBaker(renderer.gl, renderer.tex);
 
 const bakeBox = $('bake-sliders');
-slider(bakeBox, '枚数', 8, 128, 1, state.slices, (v) => `${v}枚`, (v) => { state.slices = v; updateBakeStatus(); });
+const slicesSlider = slider(bakeBox, '枚数', 8, 128, 1, state.slices, (v) => `${v}枚`, (v) => { state.slices = v; updateBakeStatus(); });
 $<HTMLSelectElement>('bake-res').onchange = (e) => { state.resolution = parseInt((e.target as HTMLSelectElement).value, 10); updateBakeStatus(); };
 
 const pixelBox = $('pixel-sliders');
@@ -771,6 +780,12 @@ $('exp-sheet').onclick = async () => {
   if (!state.finished) return;
   try { await exportSheet(state.finished, exportOptions()); toast('スプライトシートを保存しました（ダウンロードフォルダ）'); }
   catch (e) { toast((e as Error).message, true, 8000); }
+};
+$('exp-ply').onclick = () => {
+  if (!state.data) return;
+  if (maskScheduled) { maskScheduled = false; recomputeMask(); }
+  const n = exportPly(state.data, state.mask, state.R, state.stats.center as V3, fileBaseName());
+  toast(`3DGS（.ply）を保存しました（${n.toLocaleString()}個、ダウンロードフォルダ）`);
 };
 $('exp-zip').onclick = async () => {
   if (!state.finished || !state.raw) return;
@@ -1269,6 +1284,82 @@ $('demo-play').onclick = () => {
     : !m ? '⚠ このブラウザは録画に対応していません'
     : m.startsWith('video/mp4') ? '保存形式：MP4（そのままXに投稿できます）'
     : '保存形式：WebM（このブラウザはMP4録画に非対応。Xに投稿するにはMP4への変換が必要です）';
+}
+
+// ================= スプライトスタック素材 → ガウシアン =================
+slider($('sprite-sliders'), '1層の高さ', 0.25, 4, 0.25, state.spriteLayerPx, (v) => `${v}px`, (v) => { state.spriteLayerPx = v; });
+slider($('sprite-sliders'), 'ぼかし', 0.3, 1.2, 0.05, state.spriteSoftness, (v) => (v < 0.45 ? `${v.toFixed(2)}（くっきり）` : v > 0.8 ? `${v.toFixed(2)}（もこもこ）` : v.toFixed(2)), (v) => { state.spriteSoftness = v; });
+let spriteFiles: File[] = [];
+$<HTMLInputElement>('sprite-file').addEventListener('change', (e) => {
+  const fs = Array.from((e.target as HTMLInputElement).files ?? []);
+  (e.target as HTMLInputElement).value = '';
+  if (fs.length) importSprites(fs);
+});
+$('sprite-reconvert').onclick = () => { if (spriteFiles.length) importSprites(spriteFiles); };
+
+function sheetOptions(): SheetOptions {
+  return {
+    layout: $<HTMLSelectElement>('sprite-layout').value as SheetOptions['layout'],
+    frame: Math.max(0, parseInt($<HTMLInputElement>('sprite-frame').value, 10) || 0),
+    firstIsBottom: $<HTMLSelectElement>('sprite-order').value === 'bottom',
+  };
+}
+
+/** 素材を読み込み、ガウシアンにして表示する。ドット絵スタックには元の絵をそのまま使う */
+async function importSprites(files: File[]) {
+  spriteFiles = files;
+  $('sprite-opts').hidden = false;
+  progress('スプライトスタック素材を読み込み中', 0.2);
+  try {
+    const { src, note } = await loadSpriteFiles(files, sheetOptions());
+    progress('ガウシアンに変換中', 0.5);
+    await new Promise((r) => setTimeout(r, 20));
+    const conv = spritesToGaussians(src, { layerPx: state.spriteLayerPx, softness: state.spriteSoftness });
+    // ドット絵の素材にはゴミがないので、ゴミ取りフィルタは外す（等間隔のマスでは孤立判定が誤って全部消してしまう）
+    const filterInputs = [...document.querySelectorAll<HTMLInputElement>('#filter-sliders input')];
+    filterInputs[0].value = '0'; filterInputs[0].dispatchEvent(new Event('input'));
+    filterInputs[2].value = '0'; filterInputs[2].dispatchEvent(new Event('input'));
+    setData(conv.data, packSplats(conv.data), src.name);
+    state.sprite = { src };
+    // 焼き込みの代わりに、元のドット絵をそのままスライスとして使う
+    const c = state.stats.center;
+    const res = Math.max(src.w, src.d);
+    const region: BakeRegion = {
+      originX: conv.minX - c[0], originZ: conv.minZ - c[2], width: res * conv.cell,
+      y0: conv.y0 - c[1], y1: conv.y1 - c[1] + 1e-6,
+    };
+    const n = src.layers.length;
+    const pad = (l: Uint8ClampedArray) => {
+      const o = new Uint8ClampedArray(res * res * 4);
+      for (let y = 0; y < src.d; y++) o.set(l.subarray(y * src.w * 4, (y + 1) * src.w * 4), y * res * 4);
+      return o;
+    };
+    const imgs = src.layers.map(pad);
+    const { order, starts } = buildSliceOrder(region, n);
+    progress('ガウシアン・スタックを作成中', 0.7);
+    gstack.set(await buildGaussianStack(conv.data, state.R, c as [number, number, number], region, order, starts, n, () => {}));
+    state.raw = { resolution: res, slices: n, soft: imgs, nearest: imgs, region };
+    state.slices = Math.min(128, n);
+    slicesSlider.set(state.slices);
+    state.bakedKey = currentBakeKey();
+    // 元の色のまま・ドット絵モードで表示
+    state.pixel.palette = 'keep';
+    $<HTMLSelectElement>('palette-mode').value = 'keep';
+    if (state.mode !== 'pixel') ($('bake-mode').querySelector('[data-mode=pixel]') as HTMLButtonElement).click();
+    state.selectedSlice = Math.floor(n / 2);
+    refinish();
+    setTabsEnabled(true);
+    camera.target = [region.originX + region.width / 2, (region.y0 + region.y1) / 2, region.originZ + region.width / 2];
+    // 素材全体（横幅と高さの大きいほう）が収まる距離にする
+    camera.distance = Math.max(region.width, region.y1 - region.y0) * 2.2;
+    setView('compare');
+    $('sprite-info').textContent = `${src.w}×${src.d}px × ${n}層 → ガウシアン ${conv.data.count.toLocaleString()}個（中に埋もれたマス ${conv.hidden.toLocaleString()}個は省略）${note}`;
+    toast('ドット絵の素材をガウシアンに変換しました。左が3DGS、真ん中がガウシアン・スタック、右が元のドット絵です', false, 7000);
+  } catch (e) {
+    toast('素材を読み込めませんでした：' + (e as Error).message, true, 9000);
+  } finally {
+    progress(null);
+  }
 }
 
 // ---------------- メインループ ----------------
