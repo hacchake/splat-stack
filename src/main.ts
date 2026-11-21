@@ -47,7 +47,7 @@ const state = {
   slices: 32,
   resolution: 64,
   mode: 'pixel' as OutputMode,
-  pixel: { colors: 16, alphaThreshold: 0.5, outline: false, outlineColor: [26, 20, 36], fillInside: true, palette: 'auto' } as PixelOptions,
+  pixel: { colors: 16, alphaThreshold: 0.5, outline: false, outlineColor: [26, 20, 36], fillInside: true, palette: 'auto', dither: false } as PixelOptions,
   showSlices: true,
   baking: false,
   bakeCancel: false,
@@ -70,6 +70,8 @@ const state = {
   gAutoThick: true,
   /** ガウシアンの影のぼかし（高さ1あたりのぼけ） */
   gShadowSoft: 0.05,
+  /** ガウシアン・スタックで、層の中の高さを保つ（段々を消す） */
+  gKeepHeight: true,
   /** スタック系の表示で許す俯角の下限（度） */
   minPitchDeg: 20,
   texHeight: 0,
@@ -583,6 +585,7 @@ slider(pixelBox, 'アルファの\nしきい値', 0.05, 0.95, 0.05, state.pixel.
 });
 $<HTMLInputElement>('fill-inside').onchange = (e) => { state.pixel.fillInside = (e.target as HTMLInputElement).checked; scheduleRefinish(); };
 $<HTMLInputElement>('outline').onchange = (e) => { state.viewOutline = (e.target as HTMLInputElement).checked; };
+$<HTMLInputElement>('dither').onchange = (e) => { state.pixel.dither = (e.target as HTMLInputElement).checked; scheduleRefinish(); };
 $<HTMLInputElement>('outline-slices').onchange = (e) => { state.pixel.outline = (e.target as HTMLInputElement).checked; scheduleRefinish(); };
 $<HTMLInputElement>('outline-color').oninput = (e) => {
   const h = (e.target as HTMLInputElement).value;
@@ -801,6 +804,7 @@ slider($('gstack-sliders'), '上方向の厚み\n（層に対する割合）', 0
   (v) => (v === 0 ? '平ら' : `×${v.toFixed(2)}`), (v) => { state.gThickness = v; });
 slider($('gstack-shadow-sliders'), '影のぼかし', 0, 0.4, 0.01, state.gShadowSoft,
   (v) => (v === 0 ? 'くっきり' : v.toFixed(2)), (v) => { state.gShadowSoft = v; });
+$<HTMLInputElement>('g-keep-height').onchange = (e) => { state.gKeepHeight = (e.target as HTMLInputElement).checked; };
 $<HTMLInputElement>('g-auto-thick').onchange = (e) => { state.gAutoThick = (e.target as HTMLInputElement).checked; };
 
 /** ガウシアン・スタックの厚み：低い角度ほど層のすき間が見えやすいので、自動で厚くする */
@@ -811,7 +815,9 @@ function gstackShadow() {
 }
 
 function gstackThickness(pitch: number): number {
-  return state.gAutoThick ? Math.max(state.gThickness, Math.cos(pitch)) : state.gThickness;
+  // 層の中の高さを保つときは層のすき間が小さいので、足す厚みも少なくてよい（そのぶん軽くなる）
+  const auto = Math.cos(pitch) * (state.gKeepHeight ? 0.4 : 1);
+  return state.gAutoThick ? Math.max(state.gThickness, auto) : state.gThickness;
 }
 
 function setView(v: ViewMode) {
@@ -889,7 +895,7 @@ function drawMorph(rect: Rect, canvasH: number, g: ReturnType<typeof stackGeomet
   const gParams = {
     rect, canvasHeight: canvasH, yaw: camera.yaw, pitch: g.pitch, ppu: camera.focal(rect.h) / camera.distance,
     heightMul: state.heightMul, thickness: Math.max(state.gThickness, 1), shade: 0, background: state.background,
-    fromLayer: k, clear: false, shadow: gstackShadow(),
+    fromLayer: k, clear: false, shadow: gstackShadow(), keepHeight: state.gKeepHeight,
   };
   // 1) ドット絵になった層（いま変わったばかりの層は白く光る）。背景を塗った直後に、まだガウシアンの部分の影を落とす
   stack.render({
@@ -1374,7 +1380,7 @@ function drawPanel(p: Panel, rect: { x: number; y: number; w: number; h: number 
       rect, canvasHeight: canvasH, yaw: camera.yaw, pitch: g.pitch,
       ppu: camera.focal(rect.h) / camera.distance, heightMul: state.heightMul,
       thickness: gstackThickness(g.pitch), shade: state.shade, background: state.background,
-      shadow: gstackShadow(),
+      shadow: gstackShadow(), keepHeight: state.gKeepHeight,
     });
     return {
       title: 'ガウシアン・スタック',

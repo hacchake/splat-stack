@@ -17,6 +17,8 @@ export interface PixelOptions {
   fillInside: boolean;
   /** 'auto' = 自動で色を選ぶ / 'gb' = ゲームボーイ4階調 / 'nes' = ファミコンの色に寄せる / 'pico8' = PICO-8の16色に寄せる */
   palette: 'auto' | 'gb' | 'nes' | 'pico8';
+  /** ディザ（中間の色を点々の混ざりで表す） */
+  dither: boolean;
 }
 
 function fillInside(o: Uint8ClampedArray, res: number) {
@@ -100,12 +102,18 @@ export function finish(raw: BakeRaw, mode: OutputMode, opt: PixelOptions): Finis
   }
   // 3) 一番近いパレット色に置き換え
   const cache = new Map<number, number>();
+  // ディザ：4×4の決まった模様で少しずつ色をずらしてから一番近い色を選ぶと、中間の色が「点々の混ざり」で表せる
+  const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+  const amp = opt.dither ? 40 : 0;
   if (opt.palette !== 'gb') for (const o of layers) {
     for (let i = 0; i < o.length; i += 4) {
       if (!o[i + 3]) { o[i] = o[i + 1] = o[i + 2] = 0; continue; }
-      const key = (o[i] << 16) | (o[i + 1] << 8) | o[i + 2];
+      const px = (i >> 2) % res, py = Math.floor((i >> 2) / res);
+      const d = amp ? (BAYER[(py & 3) * 4 + (px & 3)] / 16 - 0.47) * amp : 0;
+      const r = Math.max(0, Math.min(255, o[i] + d)) | 0, g = Math.max(0, Math.min(255, o[i + 1] + d)) | 0, b = Math.max(0, Math.min(255, o[i + 2] + d)) | 0;
+      const key = (r << 16) | (g << 8) | b;
       let pi = cache.get(key);
-      if (pi === undefined) { pi = nearestIndex(palette, o[i], o[i + 1], o[i + 2]); cache.set(key, pi); }
+      if (pi === undefined) { pi = nearestIndex(palette, r, g, b); cache.set(key, pi); }
       const p = palette[pi];
       o[i] = p[0]; o[i + 1] = p[1]; o[i + 2] = p[2];
     }

@@ -19,13 +19,20 @@ export interface GaussianStack {
    * 1個 = 4つの uint：
    *  [0] x,z を焼き込み範囲の中で16bitに（下位x／上位z）
    *  [1] 広がり σ1,σ2（範囲の一辺で割った値）の half×2
-   *  [2] 下位16bit：楕円の角度θの half、次の8bit：層番号
+   *  [2] 下位16bit：楕円の角度θの half、次の8bit：層番号、上位8bit：層の中での高さ（0〜255）
    *  [3] 色 RGBA8
    */
   tex: Uint32Array;
   texHeight: number;
-  /** 層の中の描画順（層内の番号）。8方向ぶんを連結 */
-  orders: Uint16Array | Uint32Array;
+  /** グループの中の描画順（グループ内の番号）。8方向ぶんを連結 */
+  orders: Uint16Array;
+  /**
+   * 描画の単位「グループ」の開始位置（groups+1個）。ふつうは1層＝1グループだが、
+   * 1層に 65535 個より多く入っているときは、下から順に分ける（番号を16bitに収めるため）
+   */
+  groups: Uint32Array;
+  /** 各グループの層番号 */
+  groupLayer: Uint8Array;
   /** 1層の厚み（データの単位） */
   layerH: number;
   /** 各層の開始位置（slices+1個） */
@@ -70,10 +77,10 @@ export async function buildGaussianStack(
   const texHeight = Math.max(1, Math.ceil(n / TEX_W));
   const tex = new Uint32Array(TEX_W * texHeight * 4);
   const qx = new Uint16Array(n), qz = new Uint16Array(n);
-  const layerOf = new Uint8Array(n);
   const P = d.positions, S = d.scales, Q = d.rotations, C = d.colors;
   const W = region.width, invW = 1 / W;
   const Rq = new Array(9);
+  const layerH = (region.y1 - region.y0) / slices;
   let k = 0;
   let last = performance.now();
   for (let s = 0; s < slices; s++) {
@@ -82,6 +89,9 @@ export async function buildGaussianStack(
       const px = P[i * 3] - c[0], py = P[i * 3 + 1] - c[1], pz = P[i * 3 + 2] - c[2];
       const ax = R[0] * px + R[1] * py + R[2] * pz;
       const az = R[6] * px + R[7] * py + R[8] * pz;
+      const ay = R[3] * px + R[4] * py + R[5] * pz;
+      // 層の中での高さ（0〜255）。層の順番は変えずに、置く高さだけを本来の位置に近づけるために使う
+      const fr = Math.min(255, Math.max(0, Math.round(((ay - region.y0) / layerH - s) * 255)));
       // 整列後の回転 A = R·Rq、スケールを掛けた M = A·diag(s)。必要なのは x と z の行だけ
       quatToMat3(Q[i * 4], Q[i * 4 + 1], Q[i * 4 + 2], Q[i * 4 + 3], Rq);
       const sx = S[i * 3], sy = S[i * 3 + 1], sz = S[i * 3 + 2];
@@ -102,11 +112,11 @@ export async function buildGaussianStack(
       // 中心を焼き込み範囲の中で 0〜65535 に
       const ux = Math.min(65535, Math.max(0, Math.round((ax - region.originX) * invW * 65535)));
       const uz = Math.min(65535, Math.max(0, Math.round((az - region.originZ) * invW * 65535)));
-      qx[k] = ux; qz[k] = uz; layerOf[k] = s;
+      qx[k] = ux; qz[k] = uz;
       const b = k * 4;
       tex[b] = (ux | (uz << 16)) >>> 0;
       tex[b + 1] = (toHalf(Math.sqrt(l1) * invW) | (toHalf(Math.sqrt(l2) * invW) << 16)) >>> 0;
-      tex[b + 2] = (toHalf(theta) | (s << 16)) >>> 0;
+      tex[b + 2] = (toHalf(theta) | (s << 16) | (fr << 24)) >>> 0;
       tex[b + 3] = (C[i * 4] | (C[i * 4 + 1] << 8) | (C[i * 4 + 2] << 16) | (C[i * 4 + 3] << 24)) >>> 0;
       if ((k & 0xffff) === 0 && performance.now() - last > 30) {
         onProgress(0.6 * k / n);
@@ -117,13 +127,22 @@ export async function buildGaussianStack(
   }
 
   // ---- 向き別の描画順（層の中だけ、奥→手前）----
-  let maxSlice = 0;
-  for (let s = 0; s < slices; s++) maxSlice = Math.max(maxSlice, starts[s + 1] - starts[s]);
-  const orders = maxSlice <= 65535 ? new Uint16Array(n * GSTACK_DIRS) : new Uint32Array(n * GSTACK_DIRS);
+  // 1層が多すぎるときは、下から 65535 個ずつのグループに分ける（層の中はすでに下→上に並んでいる）
+  const gs: number[] = [], gl: number[] = [];
+  for (let s = 0; s < slices; s++) {
+    for (let a = starts[s]; a < starts[s + 1]; a += 65535) { gs.push(a); gl.push(s); }
+  }
+  gs.push(n);
+  const groups = Uint32Array.from(gs);
+  const groupLayer = Uint8Array.from(gl);
+  const G = groupLayer.length;
+  const groupOf = new Uint32Array(n);
+  for (let g = 0; g < G; g++) for (let i = groups[g]; i < groups[g + 1]; i++) groupOf[i] = g;
+  const orders = new Uint16Array(n * GSTACK_DIRS);
   const key = new Uint16Array(n);
   const tmp = new Uint32Array(n);
   const counts = new Uint32Array(65537);
-  const fill = new Uint32Array(slices);
+  const fill = new Uint32Array(G);
   for (let dir = 0; dir < GSTACK_DIRS; dir++) {
     const a = (dir * Math.PI * 2) / GSTACK_DIRS;
     const sa = Math.sin(a), ca = Math.cos(a);
@@ -138,18 +157,18 @@ export async function buildGaussianStack(
     for (let i = 0; i < n; i++) counts[key[i] + 1]++;
     for (let v = 1; v <= 65536; v++) counts[v] += counts[v - 1];
     for (let i = 0; i < n; i++) tmp[counts[key[i]]++] = i;
-    // 2回目：順番を保ったまま層ごとに分ける（安定なので、層の中は奥→手前のまま）
-    for (let s = 0; s < slices; s++) fill[s] = starts[s];
+    // 2回目：順番を保ったままグループごとに分ける（安定なので、グループの中は奥→手前のまま）
+    for (let g = 0; g < G; g++) fill[g] = groups[g];
     const base = dir * n;
     for (let t = 0; t < n; t++) {
-      const g = tmp[t], s = layerOf[g];
-      orders[base + fill[s]++] = g - starts[s];
+      const i = tmp[t], g = groupOf[i];
+      orders[base + fill[g]++] = i - groups[g];
     }
     onProgress(0.6 + 0.4 * (dir + 1) / GSTACK_DIRS);
     await yieldTask();
   }
 
-  return { count: n, slices, tex, texHeight, orders, layerH: (region.y1 - region.y0) / slices, region, starts: starts.slice() };
+  return { count: n, slices, tex, texHeight, orders, groups, groupLayer, layerH, region, starts: starts.slice() };
 }
 
 const VS = `#version 300 es
@@ -167,6 +186,7 @@ uniform float u_yaw;
 uniform float u_pitch;
 uniform float u_thick;     // 上方向の厚みを残す割合（0 = 完全に平ら）
 uniform float u_shade;
+uniform float u_keepH;     // 1 = 層の中の高さを保つ（段々を消す）／0 = 層の真ん中に置く
 uniform int u_shadow;      // 1 = 影の形を地面に描くパス
 uniform vec2 u_light;      // 高さ1あたりの影のずれ（地面上、画面基準の向き）
 uniform float u_penumbra;  // 高さ1あたりの影のぼけ（標準偏差）
@@ -181,10 +201,11 @@ void main() {
   vec2 sig = unpackHalf2x16(t.y) * u_width;
   float theta = unpackHalf2x16(t.z & 0xffffu).x;
   float layer = float((t.z >> 16u) & 0xffu);
+  float frac = mix(0.5, float(t.z >> 24u) / 255.0, u_keepH);
   vec4 col = vec4(uvec4(t.w & 0xffu, (t.w >> 8u) & 0xffu, (t.w >> 16u) & 0xffu, t.w >> 24u)) / 255.0;
 
   float total = u_slices * u_layerH;
-  float h = (layer + 0.5) * u_layerH;
+  float h = (layer + frac) * u_layerH;
   float cy = cos(u_yaw), sy = sin(u_yaw), sp = sin(u_pitch), cp = cos(u_pitch);
   // 地面(x,z)と高さ(y)から画面への正射影：画面x = x·cy − z·sy, 画面下 = (x·sy + z·cy)·sp − y·cp
   vec2 center = vec2(pos.x * cy - pos.y * sy, (pos.x * sy + pos.y * cy) * sp - (h - total * 0.5) * cp);
@@ -220,7 +241,7 @@ void main() {
   float rmax = length(major);
   if (sc.x < -rmax || sc.y < -rmax || sc.x > u_viewport.x + rmax || sc.y > u_viewport.y + rmax) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
   vec2 screen = sc + a_corner.x * major + a_corner.y * minor;
-  float bright = mix(1.0 - u_shade, 1.0, (layer + 0.5) / u_slices);
+  float bright = mix(1.0 - u_shade, 1.0, (layer + frac) / u_slices);
   v_color = vec4(col.rgb * bright, col.a);
   v_pos = a_corner * 3.0;
   gl_Position = vec4(screen.x / u_viewport.x * 2.0 - 1.0, 1.0 - screen.y / u_viewport.y * 2.0, 0.0, 1.0);
@@ -291,6 +312,8 @@ export interface GStackParams {
   clear?: boolean;
   /** 地面に落ちる影（濃さ・光の向き・光の高さ・ぼかし） */
   shadow?: GShadow | null;
+  /** 層の中の高さを保つ（初期 true） */
+  keepHeight?: boolean;
 }
 
 export interface GShadow { strength: number; azimuth: number; elevation: number; softness: number }
@@ -302,7 +325,6 @@ export class GaussianStackRenderer {
   private tex: WebGLTexture;
   private u: Record<string, WebGLUniformLocation | null> = {};
   private data: GaussianStack | null = null;
-  private bpe = 2; // 描画順の1個のバイト数（2 = Uint16, 4 = Uint32）
   private shadowProg: WebGLProgram;
   private shadowFbo: WebGLFramebuffer;
   private shadowTex: WebGLTexture;
@@ -310,7 +332,7 @@ export class GaussianStackRenderer {
 
   constructor(private gl: WebGL2RenderingContext) {
     this.prog = compile(gl);
-    for (const n of ['u_tex', 'u_base', 'u_width', 'u_viewport', 'u_ppu', 'u_layerH', 'u_slices', 'u_yaw', 'u_pitch', 'u_thick', 'u_shade',
+    for (const n of ['u_tex', 'u_base', 'u_width', 'u_viewport', 'u_ppu', 'u_layerH', 'u_slices', 'u_yaw', 'u_pitch', 'u_thick', 'u_shade', 'u_keepH',
       'u_shadow', 'u_light', 'u_penumbra'])
       this.u[n] = gl.getUniformLocation(this.prog, n);
     this.shadowProg = compile(gl, SHADOW_VS, SHADOW_FS);
@@ -361,7 +383,7 @@ export class GaussianStackRenderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32UI, TEX_W, s.texHeight, 0, gl.RGBA_INTEGER, gl.UNSIGNED_INT, s.tex);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.orderBuf);
     gl.bufferData(gl.ARRAY_BUFFER, s.orders, gl.STATIC_DRAW);
-    this.bpe = s.orders.BYTES_PER_ELEMENT;
+
   }
 
   /** カメラの向きに一番近い描画順の番号（0〜7） */
@@ -415,6 +437,7 @@ export class GaussianStackRenderer {
     gl.uniform1f(this.u.u_pitch, p.pitch);
     gl.uniform1f(this.u.u_thick, p.thickness);
     gl.uniform1f(this.u.u_shade, p.shade);
+    gl.uniform1f(this.u.u_keepH, p.keepHeight === false ? 0 : 1);
   }
 
   /** fromLayer から上の層を、向き dir の描画順で描く */
@@ -423,18 +446,18 @@ export class GaussianStackRenderer {
     let drawn = 0;
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.orderBuf);
-    const type = this.bpe === 2 ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
     const dirBase = dir * s.count;
     const from = Math.max(0, Math.min(s.slices, Math.floor(p.fromLayer ?? 0)));
-    for (let k = from; k < s.slices; k++) {
-      const start = s.starts[k], cnt = s.starts[k + 1] - start;
+    for (let g = 0; g < s.groupLayer.length; g++) {
+      if (s.groupLayer[g] < from) continue;
+      const start = s.groups[g], cnt = s.groups[g + 1] - start;
       if (cnt <= 0) continue;
       gl.uniform1ui(this.u.u_base, start);
-      gl.vertexAttribIPointer(1, 1, type, 0, (dirBase + start) * this.bpe);
+      gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_SHORT, 0, (dirBase + start) * 2);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, cnt);
       drawn += cnt;
     }
-    gl.vertexAttribIPointer(1, 1, type, 0, 0);
+    gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_SHORT, 0, 0);
     gl.bindVertexArray(null);
     return drawn;
   }
@@ -450,7 +473,7 @@ export class GaussianStackRenderer {
     if (!s || !sh || s.count === 0) return;
     const { x, y, w, h } = p.rect;
     const glY = p.canvasHeight - y - h;
-    const sw = Math.max(1, Math.ceil(w / 2)), shh = Math.max(1, Math.ceil(h / 2));
+    const sw = Math.max(1, Math.ceil(w / 3)), shh = Math.max(1, Math.ceil(h / 3));
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFbo);
     if (this.shadowSize[0] !== sw || this.shadowSize[1] !== shh) {
       gl.bindTexture(gl.TEXTURE_2D, this.shadowTex);

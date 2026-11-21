@@ -109,6 +109,7 @@
           <div class="row"><span class="lbl">パレット</span>
             <select id="palette-mode"><option value="auto" selected>自動（メディアンカット）</option><option value="gb">ゲームボーイ4階調</option>
               <option value="nes">ファミコンの色に寄せる</option><option value="pico8">PICO-8の16色に寄せる</option></select><span></span></div>
+          <label class="check" title="色数が少ないとき、なめらかな色の変化を「2色の点々の混ざり」で表します。グラデーションの多い物に向いています"><input id="dither" type="checkbox" /> ディザ（色の変わり目を点々でなめらかに）</label>
           <label class="check" title="スキャンは表面にしかガウシアンがないため、輪切りが「輪」になります。その内側を近い色で埋めます"><input id="fill-inside" type="checkbox" checked /> 輪の内側を埋める（中空対策）</label>
           <label class="check" title="重ねた後のシルエットの外側だけに線を付けます"><input id="outline" type="checkbox" /> 輪郭線（シルエットの外側） <input id="outline-color" type="color" value="#1a1424" /></label>
           <label class="check" title="書き出す各スライス画像の周りにも1pxの線を付けます。重ねると側面が線の色になるので、ふつうはオフ"><input id="outline-slices" type="checkbox" /> スライス画像にも輪郭線を付ける（書き出し用）</label>
@@ -137,6 +138,7 @@
         <div class="sub">スライスをピクセル画像にせず、ガウシアンのまま「各層の高さに置いた平たい楕円」として重ねる描き方です。「焼き込む」と同時に作られます。</div>
         <div id="gstack-sliders"></div>
         <div id="gstack-shadow-sliders"></div>
+        <label class="check" title="層の順番（描く順）はそのままに、置く高さだけを本来の位置にします。オフにすると、層の真ん中にそろえて置きます"><input id="g-keep-height" type="checkbox" checked /> 層の中の高さを保つ（段々の縞を消す）</label>
         <label class="check" title="見下ろす角度が浅いほど層のすき間が見えやすいので、そのぶん厚みを自動で足します"><input id="g-auto-thick" type="checkbox" checked /> 低い角度ほど自動で厚くする</label>
         <div class="sub">0（平ら）だと層と層の間にすき間が見えることがあります。少し上げると、層どうしがなめらかにつながります。回転の速さ・高さの倍率・明るさの差・俯角の下限は「7. スタック表示」の設定を共有します。</div>
         <div class="sub">層の中の描く順番は、8方向から見たときの「奥→手前」の並びをあらかじめ作ってあり、カメラの向きに一番近いものを使います（描くときの並べ替えはしません）。</div>
