@@ -2,9 +2,9 @@
 // わざと「少し傾いている」「周りにゴミ（フローター）や薄いモヤがある」状態にしてある
 import type { SplatData } from './splat';
 
-type Q = [number, number, number, number]; // w,x,y,z
+export type Q = [number, number, number, number]; // w,x,y,z
 
-function rng(seed: number) {
+export function rng(seed: number) {
   return () => {
     seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
     let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
@@ -13,11 +13,11 @@ function rng(seed: number) {
   };
 }
 
-function quatAxisAngle(ax: number, ay: number, az: number, angle: number): Q {
+export function quatAxisAngle(ax: number, ay: number, az: number, angle: number): Q {
   const s = Math.sin(angle / 2);
   return [Math.cos(angle / 2), ax * s, ay * s, az * s];
 }
-function quatMul(a: Q, b: Q): Q {
+export function quatMul(a: Q, b: Q): Q {
   return [
     a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
     a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
@@ -25,17 +25,17 @@ function quatMul(a: Q, b: Q): Q {
     a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
   ];
 }
-function quatRotate(q: Q, v: [number, number, number]): [number, number, number] {
+export function quatRotate(q: Q, v: [number, number, number]): [number, number, number] {
   const p = quatMul(quatMul(q, [0, v[0], v[1], v[2]]), [q[0], -q[1], -q[2], -q[3]]);
   return [p[1], p[2], p[3]];
 }
-function randomQuat(r: () => number): Q {
+export function randomQuat(r: () => number): Q {
   const u1 = r(), u2 = r() * Math.PI * 2, u3 = r() * Math.PI * 2;
   const a = Math.sqrt(1 - u1), b = Math.sqrt(u1);
   return [a * Math.sin(u2), a * Math.cos(u2), b * Math.sin(u3), b * Math.cos(u3)];
 }
 
-class Builder {
+export class Builder {
   pos: number[] = []; scl: number[] = []; rot: number[] = []; col: number[] = [];
   add(p: [number, number, number], s: [number, number, number], q: Q, c: [number, number, number, number]) {
     this.pos.push(...p); this.scl.push(...s); this.rot.push(...q);
@@ -63,9 +63,9 @@ class Builder {
   }
 }
 
-const ID: Q = [1, 0, 0, 0];
+export const ID: Q = [1, 0, 0, 0];
 
-function addGround(b: Builder, r: () => number, radius: number, count: number) {
+export function addGround(b: Builder, r: () => number, radius: number, count: number) {
   for (let i = 0; i < count; i++) {
     const a = r() * Math.PI * 2, d = Math.sqrt(r()) * radius;
     const g = 0.35 + r() * 0.15;
@@ -74,7 +74,7 @@ function addGround(b: Builder, r: () => number, radius: number, count: number) {
   }
 }
 
-function addJunk(b: Builder, r: () => number, center: [number, number, number]) {
+export function addJunk(b: Builder, r: () => number, center: [number, number, number]) {
   // 遠くに散らばるフローター
   for (let i = 0; i < 500; i++) {
     const v = [r() * 2 - 1, r() * 2 - 1, r() * 2 - 1];
@@ -98,8 +98,8 @@ function addJunk(b: Builder, r: () => number, center: [number, number, number]) 
   }
 }
 
-const TILT: Q = quatMul(quatAxisAngle(0, 0, 1, -0.22), quatAxisAngle(1, 0, 0, 0.33));
-const OFFSET: [number, number, number] = [0.7, -0.4, 0.25];
+export const TILT: Q = quatMul(quatAxisAngle(0, 0, 1, -0.22), quatAxisAngle(1, 0, 0, 0.33));
+export const OFFSET: [number, number, number] = [0.7, -0.4, 0.25];
 
 /** 色付き立方体（各面が別の色） */
 export function makeCube(): SplatData {

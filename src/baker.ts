@@ -234,7 +234,14 @@ function downsample(px: Uint8Array, hi: number, S: number): { soft: Uint8Clamped
       }
       const o = (y * res + x) * 4;
       writeStraight(soft, o, r * inv, g * inv, b * inv, a * inv);
-      const c = ((y * S + half) * hi + x * S + half) * 4;
+      // 最近傍：ブロックの中心を基本にしつつ、それよりはっきり濃いものがあればそちらを選ぶ。
+      // （中心の1点だけだと、真上から見た壁のような1ピクセル未満の細い線が抜け落ちるため）
+      let c = ((y * S + half) * hi + x * S + half) * 4;
+      let best = px[c + 3];
+      for (let sy = 0; sy < S; sy++) {
+        let q = ((y * S + sy) * hi + x * S) * 4;
+        for (let sx = 0; sx < S; sx++, q += 4) if (px[q + 3] > best + 24) { best = px[q + 3]; c = q; }
+      }
       writeStraight(nearest, o, px[c], px[c + 1], px[c + 2], px[c + 3]);
     }
   }

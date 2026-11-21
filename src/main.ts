@@ -6,6 +6,7 @@ import { OrbitCamera } from './camera';
 import { eulerToM3, m3ToEuler, modelMatrix, mul3, mul4, rotationBetween, dot, sub, normalize, I3, type M3, type V3 } from './math';
 import { pickPoint, fitPlane } from './level';
 import { makeCube, makeTree, makeStress } from './dummy';
+import { makeHouse, makeMushroom, makeCar, makeChest, makeCactus } from './dummy2';
 import { SliceBaker, type BakeRaw, type BakeRegion } from './baker';
 import { finish, type Finished, type OutputMode, type PixelOptions } from './postprocess';
 import { exportSheet, exportZip, type ExportOptions } from './exporter';
@@ -465,6 +466,11 @@ function loadDummy(make: () => SplatData, name: string) {
 $('dummy-cube').onclick = () => loadDummy(makeCube, 'テスト：色付き立方体');
 $('dummy-tree').onclick = () => loadDummy(makeTree, 'テスト：木');
 $('dummy-stress').onclick = () => loadDummy(() => makeStress(), 'テスト：100万個');
+$('dummy-house').onclick = () => loadDummy(makeHouse, 'テスト：家');
+$('dummy-mushroom').onclick = () => loadDummy(makeMushroom, 'テスト：キノコ');
+$('dummy-car').onclick = () => loadDummy(makeCar, 'テスト：車');
+$('dummy-chest').onclick = () => loadDummy(makeChest, 'テスト：宝箱');
+$('dummy-cactus').onclick = () => loadDummy(makeCactus, 'テスト：サボテン');
 
 // ---------------- 表示設定 ----------------
 $<HTMLInputElement>('show-removed').onchange = (e) => { state.showRemoved = (e.target as HTMLInputElement).checked; };
@@ -1431,9 +1437,11 @@ requestAnimationFrame(frame);
 (window as any).splatStack = {
   state, camera, stack, renderer, stackGeometry,
   /** 動作確認用：テストの木で「水平合わせ→ゴミ取り→囲む→焼き込み」までを一気に行う */
-  async demo() {
+  async demo(kind: 'tree' | 'house' | 'mushroom' | 'car' | 'chest' | 'cactus' = 'tree') {
     const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    loadDummy(makeTree, 'テスト：木');
+    const makers = { tree: makeTree, house: makeHouse, mushroom: makeMushroom, car: makeCar, chest: makeChest, cactus: makeCactus };
+    state.data = null;
+    loadDummy(makers[kind], `テスト：${kind}`);
     for (let i = 0; i < 40 && !state.data; i++) await wait(100);
     await wait(200);
     const r = canvas.getBoundingClientRect();
