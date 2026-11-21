@@ -200,7 +200,7 @@ void main() {
     float pen = u_penumbra * h;
     C = A * (S + mat2(pen * pen, 0.0, 0.0, pen * pen)) * transpose(A);
     // 1層ぶんの厚みが落とす影は、光の向きに細長く伸びる（これがないと層ごとの影が縞になる）
-    vec2 L = u_light * u_layerH * 0.6;
+    vec2 L = u_light * u_layerH * 0.9;   // 層の間隔より少し長めに伸ばして、となりの層の影とつなげる
     C += mat2(L.x * L.x, L.x * L.y * sp, L.x * L.y * sp, L.y * L.y * sp * sp);
   } else {
     C = A * S * transpose(A);
@@ -238,7 +238,8 @@ void main() {
   if (r2 > 9.0) discard;
   float al = min(0.99, exp(-0.5 * r2) * v_color.a);
   if (al < 1.0 / 255.0) discard;
-  o = u_shadow == 1 ? vec4(al) : vec4(v_color.rgb * al, al);
+  // 影は「中心の半分くらいまでは真っ黒、そこから薄くなる」形にして、重なりのむら（リング模様）を消す
+  o = u_shadow == 1 ? vec4(min(1.0, exp(-0.5 * r2) * v_color.a * 2.2)) : vec4(v_color.rgb * al, al);
 }`;
 
 // 影のマップを画面に重ねる（マップは縮小して描くので、なめらかに引き伸ばされる）
