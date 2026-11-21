@@ -65,6 +65,10 @@ const state = {
     | { kind: 'demo'; start: number; dur: number; yaw0: number; layout: 'morph' | 'split' },
   /** ガウシアン・スタックで上方向に残す厚み（層の厚みに対する割合） */
   gThickness: 0,
+  /** 低い角度ほど自動で厚くする */
+  gAutoThick: true,
+  /** スタック系の表示で許す俯角の下限（度） */
+  minPitchDeg: 20,
   texHeight: 0,
   autoRotate: true,
   rotateSpeed: 30, // 度/秒
@@ -787,6 +791,12 @@ function setTabsEnabled(on: boolean) {
 }
 slider($('gstack-sliders'), '上方向の厚み\n（層に対する割合）', 0, 1.5, 0.05, state.gThickness,
   (v) => (v === 0 ? '平ら' : `×${v.toFixed(2)}`), (v) => { state.gThickness = v; });
+$<HTMLInputElement>('g-auto-thick').onchange = (e) => { state.gAutoThick = (e.target as HTMLInputElement).checked; };
+
+/** ガウシアン・スタックの厚み：低い角度ほど層のすき間が見えやすいので、自動で厚くする */
+function gstackThickness(pitch: number): number {
+  return state.gAutoThick ? Math.max(state.gThickness, Math.cos(pitch)) : state.gThickness;
+}
 
 function setView(v: ViewMode) {
   if (v !== '3dgs' && !(stack.ready && state.finished && gstack.ready)) return;
@@ -799,6 +809,7 @@ function setView(v: ViewMode) {
 $('view-tabs').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view as ViewMode)));
 
 const stackBox = $('stack-sliders');
+slider(stackBox, '俯角の下限', 0, 60, 1, state.minPitchDeg, (v) => `${v}°`, (v) => { state.minPitchDeg = v; });
 slider(stackBox, '回転の速さ', -90, 90, 1, state.rotateSpeed, (v) => `${v}°/秒`, (v) => { state.rotateSpeed = v; });
 slider(stackBox, '高さの倍率', 0.25, 3, 0.05, state.heightMul, (v) => `×${v.toFixed(2)}`, (v) => { state.heightMul = v; });
 slider(stackBox, '高さによる\n明るさの差', 0, 0.8, 0.01, state.shade, (v) => v.toFixed(2), (v) => { state.shade = v; });
@@ -808,6 +819,12 @@ slider(stackBox, '光の高さ', 15, 85, 1, state.lightElevation, (v) => `${v}°
 $<HTMLInputElement>('auto-rotate').onchange = (e) => { state.autoRotate = (e.target as HTMLInputElement).checked; };
 $<HTMLSelectElement>('stack-sub').onchange = (e) => { state.stackSub = parseInt((e.target as HTMLSelectElement).value, 10); };
 
+/** スタック系の表示（3DGS単独以外）では、俯角を下限より下げない。スプライトスタッキングは斜め上から見る技法なので */
+function clampPitch() {
+  if (state.view === '3dgs') return;
+  camera.pitch = Math.max(camera.pitch, state.minPitchDeg * Math.PI / 180);
+}
+
 /** スタック表示用の値：3DGS表示と同じ大きさに見えるよう、カメラの距離から倍率を決める */
 function stackGeometry(canvasH: number) {
   const r = state.raw!.region;
@@ -816,7 +833,7 @@ function stackGeometry(canvasH: number) {
   const layerH = (r.y1 - r.y0) / state.raw!.slices;
   const ppu = camera.focal(canvasH) / camera.distance * unitsPerPixel;
   const layerPx = layerH / unitsPerPixel * state.heightMul;
-  const pitch = Math.max(3 * Math.PI / 180, camera.pitch);
+  const pitch = Math.max(Math.max(3, state.minPitchDeg) * Math.PI / 180, camera.pitch);
   // 自動：隣の層との画面上の隙間（px）ぶん描き足して、すき間をなくす
   const gapPx = layerPx * Math.cos(pitch) * ppu;
   const sub = state.stackSub > 0 ? state.stackSub : Math.max(1, Math.min(16, Math.ceil(gapPx)));
@@ -1009,6 +1026,7 @@ async function recordVideo() {
       // 台本どおりの角度と変身の進み具合（最後のコマの次が、ちょうど最初のコマになる）
       camera.yaw = savedYaw + (Math.PI * 2 * t) / rec.duration * Math.sign(state.rotateSpeed || 1);
       state.morph = rec.layout === 'morph' ? demoMorphAt(t, rec.duration) : 0;
+      clampPitch();
       const layout = layoutFor(state.view, w, h);
       // 左右比較では、元の3DGSをこの角度で並べ替えてから描く
       if (layout.some((l) => l.panel === '3dgs')) {
@@ -1248,6 +1266,7 @@ function frame() {
 
   // アニメーション（変身・デモ）か、ふつうの自動回転
   const animating = stepAnimation(now);
+  clampPitch();
   if (!animating && state.view !== '3dgs' && state.autoRotate && !drag) camera.yaw += state.rotateSpeed * Math.PI / 180 * Math.min(dt, 100) / 1000;
 
   const layout = layoutFor(state.view, w, h);
@@ -1336,15 +1355,17 @@ function drawPanel(p: Panel, rect: { x: number; y: number; w: number; h: number 
     const n = gstack.render({
       rect, canvasHeight: canvasH, yaw: camera.yaw, pitch: g.pitch,
       ppu: camera.focal(rect.h) / camera.distance, heightMul: state.heightMul,
-      thickness: state.gThickness, shade: state.shade, background: state.background,
+      thickness: gstackThickness(g.pitch), shade: state.shade, background: state.background,
     });
     return {
       title: 'ガウシアン・スタック',
       lines: [
         `ガウシアン ${n.toLocaleString()}`,
-        `GPUメモリ  ${MB(gstack.gpuBytes)}`,
+        `GPUメモリ  ${MB(gstack.gpuBytes)}（1個 ${gstack.bytesPerGaussian.toFixed(0)}B）`,
         `GPU時間    ${gpuMs(p)}`,
         `並べ替え   なし（層の順＝奥行き）`,
+        `層内の並び 8方向から選択（並べ替えなし）`,
+        `厚み       ×${gstackThickness(g.pitch).toFixed(2)}`,
       ],
     };
   }
